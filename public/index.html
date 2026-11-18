@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#16161a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="번뜩">
+  <title>번뜩</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <a href="#/" class="brand"><span class="spark"></span>번뜩</a>
+    <input id="search" type="search" placeholder="기록 검색" autocomplete="off">
+    <select id="engine" title="아이데이션에 쓸 AI">
+      <option value="auto">자동</option>
+      <option value="claude">Claude</option>
+      <option value="codex">Codex</option>
+    </select>
+    <a href="/api/export.md" class="icon-btn" title="마크다운으로 내보내기" aria-label="내보내기">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
+  </header>
+
+  <nav id="tags" class="tags"></nav>
+  <p id="engine-warning" class="warning" hidden></p>
+
+  <main id="feed" class="feed"></main>
+
+  <section id="detail" class="detail" hidden></section>
+
+  <form id="composer" class="composer">
+    <div id="previews" class="previews"></div>
+    <div class="row">
+      <label class="icon-btn attach" title="사진, 캡처, 영상, 파일 첨부" aria-label="첨부">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M21 11.5 12.6 20a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <input id="files" type="file" multiple accept="image/*,video/*,audio/*,text/*,application/pdf" hidden>
+      </label>
+      <textarea id="text" rows="1" placeholder="떠오른 생각을 그대로 적어 보세요"></textarea>
+      <button id="send" class="send" type="submit" aria-label="보내기">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 12 20 4l-6 16-3-7-7-1Z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </form>
+
+  <template id="tpl-card">
+    <article class="card">
+      <div class="meta"><time></time><span class="status"></span></div>
+      <h3 class="title"></h3>
+      <p class="raw"></p>
+      <div class="thumbs"></div>
+      <p class="summary"></p>
+      <div class="chips"></div>
+    </article>
+  </template>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

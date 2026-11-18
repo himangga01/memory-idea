@@ -1,0 +1,21 @@
+{
+  "name": "memory-idea",
+  "version": "0.1.0",
+  "private": true,
+  "description": "번뜩 떠오른 아이디어, 캡처, 영상, 링크를 원문 그대로 기록하고 Claude CLI / Codex CLI로 자동 아이데이션하는 개인용 PWA",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "mock": "MOCK_AI=1 node server.js",
+    "test": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.2"
+  }
+}
