@@ -1,10 +1,14 @@
+import './lib/env.js';
 import express from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { Store } from './lib/store.js';
-import { extractUrls, kindOf, extractVideoFrames, fetchLinkPreview } from './lib/media.js';
+import { extractUrls, kindOf, extractVideoFrames } from './lib/media.js';
+import { fetchLink } from './lib/links.js';
+import { startTelegram } from './lib/telegram.js';
 import { engines, ideate, followUp } from './lib/ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +18,7 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN || '';
 const DEFAULT_ENGINE = process.env.DEFAULT_ENGINE || 'auto';
 const ENGINES = new Set(['auto', 'claude', 'codex']);
+const MAX_LINKS = 5;
 
 const store = new Store(DATA_DIR);
 const app = express();
@@ -88,7 +93,7 @@ function fixName(name = '') {
   }
 }
 
-async function createIdea({ text = '', files = [], engine = DEFAULT_ENGINE, source = 'app' }) {
+async function createIdea({ text = '', files = [], engine = DEFAULT_ENGINE, source = 'app', extraUrls = [], meta = {}, origin = null }) {
   // multipart 전송은 줄바꿈을 CRLF로 바꿔 보내므로 사용자가 입력한 LF로 되돌린다.
   text = String(text).replace(/\r\n?/g, '\n');
   const id = Store.newId();
@@ -114,8 +119,12 @@ async function createIdea({ text = '', files = [], engine = DEFAULT_ENGINE, sour
     createdAt: now,
     updatedAt: now,
     source,
-    raw: { text, urls: extractUrls(text), attachments },
-    linkPreviews: [],
+    origin,
+    // raw: 사용자가 보낸 그대로. 이후 어떤 작업도 이 값을 고치지 않는다.
+    raw: { text, urls: [...new Set([...extractUrls(text), ...extraUrls])], attachments, meta },
+    links: [],
+    category: null,
+    categoryLocked: false,
     status: 'queued',
     engine: ENGINES.has(engine) ? engine : DEFAULT_ENGINE,
     engineUsed: null,
@@ -131,6 +140,7 @@ async function createIdea({ text = '', files = [], engine = DEFAULT_ENGINE, sour
 
 // ---------- 작업 대기열 (CLI는 무거워서 한 번에 하나씩 실행) ----------
 
+const events = new EventEmitter();
 const queue = [];
 let busy = false;
 
@@ -146,7 +156,7 @@ async function pump() {
   busy = true;
   try {
     if (job.type === 'ideate') await runIdeation(job.id);
-    if (job.type === 'thread') await runThread(job.id, job.engine);
+    if (job.type === 'thread') await runThread(job.id, job.engine, job.origin);
   } catch (e) {
     console.error('[queue]', e);
   } finally {
@@ -157,50 +167,72 @@ async function pump() {
 
 const aiOpts = (engine) => ({ engine, uploadPath: (f) => store.uploadPath(f), workDir: DATA_DIR });
 
+/** 링크를 따라가 본문을 읽는다. 이미 읽은 링크는 다시 읽지 않고, 실패했던 링크만 다시 시도한다. */
+async function readLinks(idea) {
+  const urls = idea.raw.urls.slice(0, MAX_LINKS);
+  const done = new Map((idea.links || []).filter((l) => l.content && !l.error).map((l) => [l.url, l]));
+  return Promise.all(urls.map((u) => done.get(u) || fetchLink(u)));
+}
+
 async function runIdeation(id) {
   let idea = store.update(id, (i) => {
     i.status = 'running';
     i.error = null;
   });
   if (!idea) return;
-  if (idea.raw.urls.length && !idea.linkPreviews.length) {
-    const previews = await Promise.all(idea.raw.urls.slice(0, 5).map(fetchLinkPreview));
-    idea = store.update(id, (i) => (i.linkPreviews = previews));
+  if (idea.raw.urls.length) {
+    const links = await readLinks(idea);
+    idea = store.update(id, (i) => (i.links = links));
   }
   try {
     const { engine, ideation } = await ideate(idea, store.list(), aiOpts(idea.engine));
-    store.update(id, (i) => {
+    idea = store.update(id, (i) => {
       if (i.ideation) i.ideationHistory.push({ at: i.updatedAt, engine: i.engineUsed, ideation: i.ideation });
       i.ideation = ideation;
+      if (!i.categoryLocked) i.category = ideation.category;
       i.engineUsed = engine;
       i.status = 'done';
     });
+    events.emit('ideation:done', idea);
   } catch (e) {
-    store.update(id, (i) => {
+    idea = store.update(id, (i) => {
       i.status = 'error';
       i.error = e.message;
     });
+    events.emit('ideation:error', idea);
   }
 }
 
-async function runThread(id, engine) {
+async function runThread(id, engine, origin) {
   const idea = store.update(id, (i) => (i.threadStatus = 'running'));
   if (!idea) return;
   const last = idea.thread[idea.thread.length - 1];
   if (!last || last.role !== 'user') return store.update(id, (i) => (i.threadStatus = null));
+  let reply;
   try {
     const context = { ...idea, thread: idea.thread.slice(0, -1) };
-    const r = await followUp(context, last.text, aiOpts(engine));
-    store.update(id, (i) => {
-      i.thread.push({ role: 'ai', text: r.text, engine: r.engine, at: new Date().toISOString() });
-      i.threadStatus = null;
-    });
+    const r = await followUp(context, last.text, aiOpts(engine || idea.engine));
+    reply = { role: 'ai', text: r.text, engine: r.engine, at: new Date().toISOString() };
   } catch (e) {
-    store.update(id, (i) => {
-      i.thread.push({ role: 'ai', text: `응답을 받지 못했습니다.\n${e.message}`, error: true, at: new Date().toISOString() });
-      i.threadStatus = null;
-    });
+    reply = { role: 'ai', text: `응답을 받지 못했습니다.\n${e.message}`, error: true, at: new Date().toISOString() };
   }
+  const updated = store.update(id, (i) => {
+    i.thread.push(reply);
+    i.threadStatus = null;
+  });
+  events.emit('thread:done', updated, reply, origin);
+}
+
+/** 기록에 후속 질문을 붙이고 대기열에 넣는다. 웹과 텔레그램이 함께 쓴다. */
+function requestThread(id, message, origin = null, engine = null) {
+  const cur = store.get(id);
+  if (!cur || cur.threadStatus) return false;
+  store.update(id, (i) => {
+    i.thread.push({ role: 'user', text: message, at: new Date().toISOString(), ...(origin?.telegram ? { via: 'telegram' } : {}) });
+    i.threadStatus = 'queued';
+  });
+  enqueue({ type: 'thread', id, engine: ENGINES.has(engine) ? engine : null, origin });
+  return true;
 }
 
 // 재시작 시 남아 있던 작업 이어서 처리
@@ -222,6 +254,7 @@ function summary(i) {
     urls: i.raw.urls,
     status: i.status,
     error: i.error,
+    category: i.category,
     title: i.ideation?.title || null,
     summary: i.ideation?.summary || null,
     tags: i.ideation?.tags || [],
@@ -232,7 +265,7 @@ function summary(i) {
 
 function matches(i, q) {
   if (!q) return true;
-  const hay = [i.raw.text, i.ideation && JSON.stringify(i.ideation), ...(i.linkPreviews || []).map((l) => `${l.title} ${l.description}`), ...i.thread.map((m) => m.text)]
+  const hay = [i.raw.text, i.ideation && JSON.stringify(i.ideation), i.category, ...(i.links || []).map((l) => `${l.title} ${l.description} ${l.content || ''}`), ...i.thread.map((m) => m.text)]
     .join(' ')
     .toLowerCase();
   return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
@@ -244,14 +277,19 @@ app.get('/api/engines', (req, res) => {
 });
 
 app.get('/api/ideas', (req, res) => {
-  const { q = '', tag = '' } = req.query;
-  const items = store
-    .list()
+  const { q = '', tag = '', category = '' } = req.query;
+  const all = store.list();
+  const items = all
     .filter((i) => matches(i, q))
+    .filter((i) => !category || i.category === category)
     .filter((i) => !tag || (i.ideation?.tags || []).includes(tag));
+  // 태그 목록은 선택한 분류 안에서만 센다
   const tags = {};
-  for (const i of store.list()) for (const t of i.ideation?.tags || []) tags[t] = (tags[t] || 0) + 1;
-  res.json({ items: items.map(summary), tags: Object.entries(tags).sort((a, b) => b[1] - a[1]), busy, queued: queue.length });
+  for (const i of all.filter((x) => !category || x.category === category)) for (const t of i.ideation?.tags || []) tags[t] = (tags[t] || 0) + 1;
+  const cats = {};
+  for (const i of all) if (i.category) cats[i.category] = (cats[i.category] || 0) + 1;
+  const sort = (m) => Object.entries(m).sort((a, b) => b[1] - a[1]);
+  res.json({ items: items.map(summary), total: all.length, categories: sort(cats), tags: sort(tags), busy, queued: queue.length });
 });
 
 app.get('/api/ideas/:id', (req, res) => {
@@ -282,16 +320,28 @@ app.post('/api/ideas/:id/ideate', (req, res) => {
 app.post('/api/ideas/:id/thread', (req, res) => {
   const message = String(req.body?.message || '').trim();
   if (!message) return res.status(400).json({ error: '메시지가 비어 있습니다' });
-  const engine = ENGINES.has(req.body?.engine) ? req.body.engine : DEFAULT_ENGINE;
-  const cur = store.get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'not found' });
-  if (cur.threadStatus) return res.status(409).json({ error: '이전 질문에 대한 답을 기다리는 중입니다' });
-  const idea = store.update(req.params.id, (i) => {
-    i.thread.push({ role: 'user', text: message, at: new Date().toISOString() });
-    i.threadStatus = 'queued';
-  });
-  enqueue({ type: 'thread', id: idea.id, engine });
+  if (!store.get(req.params.id)) return res.status(404).json({ error: 'not found' });
+  if (!requestThread(req.params.id, message, null, req.body?.engine)) {
+    return res.status(409).json({ error: '이전 질문에 대한 답을 기다리는 중입니다' });
+  }
   res.json({ ok: true });
+});
+
+// 분류를 직접 바꾸면 이후 다시 아이데이션해도 그 분류를 유지한다. 빈 값이면 다시 AI에게 맡긴다.
+app.patch('/api/ideas/:id', (req, res) => {
+  const category = typeof req.body?.category === 'string' ? req.body.category.trim().slice(0, 20) : undefined;
+  const idea = store.update(req.params.id, (i) => {
+    if (category === undefined) return;
+    if (category) {
+      i.category = category;
+      i.categoryLocked = true;
+    } else {
+      i.categoryLocked = false;
+      i.category = i.ideation?.category || null;
+    }
+  });
+  if (!idea) return res.status(404).json({ error: 'not found' });
+  res.json(summary(idea));
 });
 
 app.delete('/api/ideas/:id', (req, res) => {
@@ -303,12 +353,15 @@ app.get('/api/export.md', (_req, res) => {
   const out = ['# 번뜩 기록 내보내기', '', `내보낸 시각: ${new Date().toISOString()}`, ''];
   for (const i of store.list()) {
     const d = i.ideation;
-    out.push(`## ${d?.title || '(아이데이션 전)'}`, '', `- 기록: ${i.createdAt}`, `- id: ${i.id}`);
+    out.push(`## ${d?.title || '(아이데이션 전)'}`, '', `- 기록: ${i.createdAt}`, `- 분류: ${i.category || '미분류'}`, `- id: ${i.id}`);
     if (d?.tags?.length) out.push(`- 태그: ${d.tags.map((t) => `#${t}`).join(' ')}`);
     out.push('', '### 원문', '', '```', i.raw.text, '```', '');
     for (const a of i.raw.attachments) out.push(`- 첨부(${a.kind}): ${a.originalName} → uploads/${a.file}`);
     if (d) {
       out.push('', '### 아이데이션', '', d.summary, '', `**해석** ${d.interpretation}`, '');
+      for (const l of d.link_summaries || []) {
+        out.push(`**링크: [${l.title || l.url}](${l.url})**`, '', l.summary, ...l.key_points.map((k) => `- ${k}`), '');
+      }
       out.push(`- 문제: ${d.concept.problem}`, `- 대상: ${d.concept.target}`, `- 방법: ${d.concept.solution}`, `- 차별점: ${d.concept.difference}`, '');
       out.push('**발전 방향**', ...d.directions.map((x) => `- ${x.name}: ${x.description}`), '');
       out.push('**질문**', ...d.questions.map((x) => `- ${x}`), '');
@@ -345,3 +398,18 @@ app.listen(PORT, HOST, () => {
   console.log(`AI 엔진: claude ${e.claude.available ? '사용 가능' : '없음'} · codex ${e.codex.available ? '사용 가능' : '없음'}${e.mock.available ? ' · MOCK 모드' : ''}`);
   if (!ACCESS_TOKEN && HOST !== '127.0.0.1') console.log('주의: ACCESS_TOKEN이 없어 같은 네트워크의 누구나 접속할 수 있습니다.');
 });
+
+// ---------- 텔레그램 ----------
+
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  startTelegram({
+    token: process.env.TELEGRAM_BOT_TOKEN,
+    allowedUsers: (process.env.TELEGRAM_ALLOWED_USERS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    apiBase: process.env.TELEGRAM_API_BASE || 'https://api.telegram.org',
+    publicUrl: (process.env.PUBLIC_URL || '').replace(/\/$/, ''),
+    store,
+    createIdea,
+    requestThread,
+    events,
+  });
+}

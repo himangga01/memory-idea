@@ -121,6 +121,27 @@ button { cursor: pointer; }
   font-size: 13px;
 }
 
+.categories {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 10px 14px 0;
+  scrollbar-width: none;
+}
+.categories:empty { display: none; }
+.cat {
+  flex: none;
+  border: 0;
+  background: none;
+  padding: 4px 2px;
+  margin-right: 8px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.cat small { margin-left: 4px; font-weight: 400; opacity: .7; }
+.cat.active { color: var(--text); border-bottom-color: var(--accent); }
+
 /* ---------- 피드 ---------- */
 .feed {
   flex: 1;
@@ -326,6 +347,35 @@ body.has-detail .composer { display: none; }
   font-size: 14px;
 }
 .link-card span { color: var(--muted); font-size: 13px; }
+.link-card details { margin-top: 6px; font-size: 13px; }
+.link-card summary { cursor: pointer; color: var(--muted); }
+.link-card .fetched {
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+}
+.link-card .link-error { color: var(--danger); margin-top: 4px; }
+.forwarded { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.labels { display: flex; gap: 6px; align-items: center; }
+.category {
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--accent);
+  color: var(--text);
+  background: none;
+  border-radius: 6px;
+  padding: 0 7px;
+}
+.link-summary + .link-summary { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.link-summary a { text-decoration: none; }
+.link-summary p { margin: 4px 0; }
+.link-summary ul { margin-top: 4px; }
+.link-summary .why { color: var(--muted); font-size: 14px; }
 
 .ideation { display: flex; flex-direction: column; gap: 12px; }
 .ideation-head h2 { margin: 2px 0 4px; font-size: 22px; line-height: 1.35; }

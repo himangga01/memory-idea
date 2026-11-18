@@ -1,5 +1,5 @@
 // 앱 화면만 캐시하고, 기록과 API는 항상 서버에서 받아온다.
-const CACHE = 'memory-idea-v1';
+const CACHE = 'memory-idea-v2';
 const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/manifest.webmanifest', '/icons/icon.svg'];
 
 self.addEventListener('install', (e) => {

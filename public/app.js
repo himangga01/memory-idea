@@ -5,6 +5,9 @@ const state = {
   tags: [],
   q: '',
   tag: '',
+  category: '',
+  categories: [],
+  total: 0,
   files: [],
   detailId: null,
   detail: null,
@@ -49,7 +52,8 @@ function fmtTime(iso) {
 }
 
 const STATUS = { queued: '대기 중', running: '아이데이션 중', done: '', error: '실패' };
-const TYPE = { idea: '아이디어', inspiration: '영감', problem: '문제의식', question: '질문', memo: '메모' };
+const SOURCE = { share: '공유', telegram: '텔레그램' };
+const TYPE = { idea: '아이디어', inspiration: '영감', problem: '문제의식', question: '질문', memo: '메모', reference: '자료' };
 
 function linkify(text) {
   const frag = document.createDocumentFragment();
@@ -82,12 +86,33 @@ async function loadList() {
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
   if (state.tag) params.set('tag', state.tag);
+  if (state.category) params.set('category', state.category);
   const data = await api(`/api/ideas?${params}`);
   state.items = data.items;
   state.tags = data.tags;
+  state.categories = data.categories;
+  state.total = data.total;
   renderFeed();
+  renderCategories();
   renderTags();
   schedulePoll();
+}
+
+function renderCategories() {
+  const nav = $('#categories');
+  if (!state.categories.length) return nav.replaceChildren();
+  nav.replaceChildren(
+    h('button', { class: `cat${state.category ? '' : ' active'}`, onclick: () => setCategory('') }, '전체', h('small', {}, state.total)),
+    ...state.categories.map(([c, n]) =>
+      h('button', { class: `cat${state.category === c ? ' active' : ''}`, onclick: () => setCategory(c) }, c, h('small', {}, n)),
+    ),
+  );
+}
+
+function setCategory(c) {
+  state.category = c;
+  state.tag = '';
+  loadList();
 }
 
 function renderTags() {
@@ -123,7 +148,7 @@ function renderFeed() {
       const card = tpl.content.firstElementChild.cloneNode(true);
       card.dataset.id = it.id;
       card.classList.add(`s-${it.status}`);
-      $('time', card).textContent = fmtTime(it.createdAt) + (it.source === 'share' ? ' · 공유' : '');
+      $('time', card).textContent = [it.category, fmtTime(it.createdAt), SOURCE[it.source]].filter(Boolean).join(' · ');
       $('.status', card).textContent = STATUS[it.status] || '';
       $('.title', card).textContent = it.title || '';
       $('.raw', card).textContent = it.text;
@@ -192,11 +217,21 @@ function renderIdeation(d, idea) {
   ].filter(([, v]) => v);
   return h('div', { class: 'ideation' },
     h('div', { class: 'ideation-head' },
-      h('span', { class: 'type' }, TYPE[d.type] || d.type),
+      h('div', { class: 'labels' },
+        h('button', { class: 'category', title: '분류 바꾸기', onclick: () => changeCategory(idea) }, idea.category || d.category, idea.categoryLocked ? ' (직접 지정)' : ''),
+        h('span', { class: 'type' }, TYPE[d.type] || d.type),
+      ),
       h('h2', {}, d.title),
       h('p', { class: 'lead' }, d.summary),
-      h('div', { class: 'chips' }, ...d.tags.map((t) => h('button', { class: 'chip', onclick: () => { location.hash = '#/'; setTag(t); } }, `#${t}`))),
+      h('div', { class: 'chips' }, ...d.tags.map((t) => h('button', { class: 'chip', onclick: () => { location.hash = '#/'; state.category = ''; setTag(t); } }, `#${t}`))),
     ),
+    d.link_summaries?.length ? section('링크 정리', ...d.link_summaries.map((l) =>
+      h('div', { class: 'link-summary' },
+        h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, h('strong', {}, l.title || l.url)),
+        h('p', {}, l.summary),
+        list(l.key_points),
+        l.why_saved && h('p', { class: 'why' }, l.why_saved),
+      ))) : null,
     section('이렇게 읽었어요', h('p', {}, d.interpretation)),
     conceptRows.length && section('구체화', h('dl', { class: 'concept' }, ...conceptRows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))),
     section('발전 방향', ...d.directions.map((x) => h('div', { class: 'direction' }, h('strong', {}, x.name), h('p', {}, x.description)))),
@@ -219,7 +254,7 @@ function renderDetail() {
   const raw = idea.raw;
 
   const thread = h('div', { class: 'thread' },
-    ...idea.thread.map((m) => h('div', { class: `msg ${m.role}${m.error ? ' error' : ''}` }, h('p', {}, m.text), m.engine && h('small', {}, m.engine))),
+    ...idea.thread.map((m) => h('div', { class: `msg ${m.role}${m.error ? ' error' : ''}` }, h('p', {}, m.text), (m.engine || m.via) && h('small', {}, m.via === 'telegram' ? '텔레그램에서' : m.engine))),
     idea.threadStatus && h('div', { class: 'msg ai pending' }, h('span', { class: 'spinner' }), '생각하는 중'),
   );
 
@@ -280,8 +315,15 @@ function renderDetail() {
         h('div', { class: 'meta' }, h('span', {}, '원문'), h('time', {}, fmtTime(idea.createdAt))),
         raw.text ? h('div', { class: 'raw-full' }, linkify(raw.text)) : null,
         raw.attachments.length ? h('div', { class: 'media-list' }, ...raw.attachments.map((a) => mediaThumb(a, { large: true }))) : null,
-        idea.linkPreviews?.filter((l) => l.title || l.description).map((l) =>
-          h('a', { class: 'link-card', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, h('strong', {}, l.title || l.url), l.description && h('span', {}, l.description)),
+        raw.meta?.forwardedFrom && h('p', { class: 'forwarded' }, `전달된 메시지 · ${raw.meta.forwardedFrom}`, raw.meta.sourceUrl && h('a', { href: raw.meta.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, ' 원본')),
+        (idea.links || []).map((l) =>
+          h('div', { class: 'link-card' },
+            h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer' }, h('strong', {}, l.title || l.url)),
+            l.description && h('span', {}, l.description),
+            l.content
+              ? h('details', {}, h('summary', {}, `가져온 본문 ${l.content.length.toLocaleString()}자${l.hasTranscript ? ' · 자막 포함' : ''}`), h('div', { class: 'fetched' }, l.content))
+              : h('span', { class: 'link-error' }, `본문을 가져오지 못했습니다${l.error ? ` (${l.error})` : ''}. 다시 아이데이션하면 재시도합니다.`),
+          ),
         ),
       ),
       renderIdeation(idea.ideation, idea),
@@ -291,6 +333,19 @@ function renderDetail() {
   );
   panel.hidden = false;
   document.body.classList.add('has-detail');
+}
+
+async function changeCategory(idea) {
+  const names = state.categories.map(([c]) => c).join(', ');
+  const next = prompt(`새 분류 이름을 입력하세요. 비우면 AI가 정한 분류로 되돌립니다.\n기존 분류: ${names}`, idea.category || '');
+  if (next === null) return;
+  await api(`/api/ideas/${idea.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ category: next }),
+  });
+  loadDetail(idea.id, { keepScroll: true });
+  loadList();
 }
 
 function closeDetail() {
